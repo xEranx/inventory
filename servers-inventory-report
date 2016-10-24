@@ -1,0 +1,590 @@
+$ScriptName = "servers-inventory-report"
+
+
+### execution time ###
+$ScriptStartRunTime = (Get-Date)
+
+
+###region general variables ###
+$Now = ( Get-Date )
+$Date = ( Get-Date ).ToString('dd-MMM-yyyy')
+$DateStamp = ( Get-Date ).ToString('yyyyMMdd-HHmm')
+$SimpleDate = ( Get-Date )
+$StandardTimeZoneName = ([System.TimeZone]::CurrentTimeZone).StandardName
+
+### $ConsoleVerbose = "On" ### comment to turn off
+$ConsoleVerboseFull = "On" ### comment to turn off
+
+### $ReportType = "AD" ### query AD info only
+$ReportType = "Full" ### AD info and WMI, RemotePS
+
+$MaxLastLogonDays = 3
+$FreeSpaceWarning = 20
+$FreeSpaceCritical = 10
+
+
+$ReportFileCSV = "C:\Scripts\TEMP\ReportFiles\Servers-$DateStamp.csv"
+$FreeSpaceFileName = "C:\Scripts\TEMP\ReportFiles\FreeSpace-ALL-$DateStamp.htm"
+New-Item -ItemType file $FreeSpaceFileName -Force
+$LogFileWMI = "C:\Scripts\TEMP\ReportFiles\FreeSpace-ALL-Unreachable-$DateStamp.txt"
+New-Item -ItemType file $LogFileWMI -Force
+
+
+$ITAdmin1 = "eran"
+$SMTPServer = "EXCHANGE"
+$MsgSubject = "Servers Inventory Report - $date"
+
+
+### initialize variables ###
+$Count = 1
+
+
+### Initialize a dynamic array (table) ###
+$Report = @()
+
+
+### get AD DNSRoot for OU normalization ###
+$DomainDNSRoot = (Get-ADDomain | Select DNSRoot).DNSRoot
+$DomainDNSRootReplace = $DomainDNSRoot + "/"
+
+$DomainDN = (Get-ADDomain | Select DistinguishedName).DistinguishedName
+$DomainDNReplace = "," + $DomainDN
+###endregion general variables ###
+
+
+###region FreeSpace ###
+### Function to write the HTML Header to the file ###
+Function writeHtmlHeader
+{
+	param($fileName)
+	Add-Content $fileName "<html>"
+	Add-Content $fileName "<head>"
+	Add-Content $fileName "<meta http-equiv='Content-Type' content='text/html; charset=iso-8859-1'>"
+	Add-Content $fileName '<title>Server Inventory</title>'
+	Add-Content $fileName '<STYLE TYPE="text/css">'
+	Add-Content $fileName "<!--"
+	Add-Content $fileName "td {"
+	Add-Content $fileName "font-family: Tahoma;"
+	Add-Content $fileName  "font-size: 11px;"
+	Add-Content $fileName  "border-top: 1px solid #999999;"
+	Add-Content $fileName  "border-right: 1px solid #999999;"
+	Add-Content $fileName  "border-bottom: 1px solid #999999;"
+	Add-Content $fileName  "border-left: 1px solid #999999;"
+	Add-Content $fileName  "padding-top: 0px;"
+	Add-Content $fileName  "padding-right: 0px;"
+	Add-Content $fileName  "padding-bottom: 0px;"
+	Add-Content $fileName  "padding-left: 0px;"
+	Add-Content $fileName  "}"
+	Add-Content $fileName  "body {"
+	Add-Content $fileName  "margin-left: 5px;"
+	Add-Content $fileName  "margin-top: 5px;"
+	Add-Content $fileName  "margin-right: 0px;"
+	Add-Content $fileName  "margin-bottom: 10px;"
+	Add-Content $fileName  ""
+	Add-Content $fileName  "table {"
+	Add-Content $fileName  "border: thin solid #000000;"
+	Add-Content $fileName  "}"
+	Add-Content $fileName  "-->"
+	Add-Content $fileName  "</style>"
+	Add-Content $fileName  "</head>"
+	Add-Content $fileName  "<body>"
+	Add-Content $fileName  "<table width='100%'>"
+	Add-Content $fileName  "<tr bgcolor='#CCCCCC'>"
+	Add-Content $fileName  "<td colspan='7' height='25' align='center'>"
+	Add-Content $fileName  "<font face='tahoma' color='#003399' size='4'><strong>Domain:$DomainDNSRoot - Disk Space - $DateStamp - $StandardTimeZoneName</strong></font>"
+	Add-Content $fileName  "</td>"
+	Add-Content $fileName  "</tr>"
+	Add-Content $fileName  "</table>"
+}
+
+### Function to write the Table Header to the file ###
+Function writeTableHeader
+{
+	param($fileName)
+
+	Add-Content $fileName "<tr bgcolor=#CCCCCC>"
+	Add-Content $fileName "<td width='10%' align='center'>Drive</td>"
+	Add-Content $fileName "<td width='50%' align='center'>Drive Label</td>"
+	Add-Content $fileName "<td width='10%' align='center'>Total Capacity(GB)</td>"
+	Add-Content $fileName "<td width='10%' align='center'>Used Capacity(GB)</td>"
+	Add-Content $fileName "<td width='10%' align='center'>Free Space(GB)</td>"
+	Add-Content $fileName "<td width='10%' align='center'>Freespace %</td>"
+	Add-Content $fileName "</tr>"
+}
+
+### Function to write the HTML Footer to the file ###
+Function writeHtmlFooter
+{
+	param($fileName)
+	#
+	Add-Content $fileName  "<table width='100%'>"
+	Add-Content $fileName  "<tr bgcolor='#CCCCCC'>"
+	Add-Content $fileName  "<td colspan='7' height='25' align='center'>"
+	Add-Content $fileName  "<font face='tahoma' color='#003399' size='1'>$ScriptTotalRunTime m</font>"
+	Add-Content $fileName  "</td>"
+	Add-Content $fileName  "</tr>"
+	Add-Content $fileName  "</table>"
+	#>
+	Add-Content $fileName "</body>"
+	Add-Content $fileName "</html>"
+}
+
+### Function to write DiskInfo to the file ###
+Function writeDiskInfo
+{
+	param($fileName,$devId,$volName,$frSpace,$totSpace)
+	$totSpace=[math]::Round(($totSpace/1073741824),0)
+	$frSpace=[Math]::Round(($frSpace/1073741824),0)
+	$usedSpace = $totSpace - $frspace
+	$usedSpace=[Math]::Round($usedSpace,2)
+	$freePercent = ($frspace/$totSpace)*100
+	$freePercent = [Math]::Round($freePercent,0)
+
+	if ($volName -eq "Paging")
+	{
+		Add-Content $fileName "<tr>"
+		Add-Content $fileName "<td>$devid</td>"
+		Add-Content $fileName "<td>$volName</td>"
+		Add-Content $fileName "<td>$totSpace</td>"
+		Add-Content $fileName "<td>$usedSpace</td>"
+		Add-Content $fileName "<td>$frSpace</td>"
+		Add-Content $fileName "<td bgcolor='#00FF00' align=center>$freePercent</td>"
+		Add-Content $fileName "</tr>"
+	}
+
+	elseif ($volName -eq "System Reserved")
+	{
+		Add-Content $fileName "<tr>"
+		Add-Content $fileName "<td>$devid</td>"
+		Add-Content $fileName "<td>$volName</td>"
+		Add-Content $fileName "<td>$totSpace</td>"
+		Add-Content $fileName "<td>$usedSpace</td>"
+		Add-Content $fileName "<td>$frSpace</td>"
+		Add-Content $fileName "<td bgcolor='#00FF00' align=center>$freePercent</td>"
+		Add-Content $fileName "</tr>"
+	}
+	
+	elseif ($freePercent -gt $FreeSpaceWarning)
+	{
+		Add-Content $fileName "<tr>"
+		Add-Content $fileName "<td>$devid</td>"
+		Add-Content $fileName "<td>$volName</td>"
+		Add-Content $fileName "<td>$totSpace</td>"
+		Add-Content $fileName "<td>$usedSpace</td>"
+		Add-Content $fileName "<td>$frSpace</td>"
+		Add-Content $fileName "<td bgcolor='#00FF00' align=center>$freePercent</td>"
+		Add-Content $fileName "</tr>"
+	}
+
+	elseif ($freePercent -le $FreeSpaceCritical)
+	{
+		Add-Content $fileName "<tr>"
+		Add-Content $fileName "<td>$devid</td>"
+		Add-Content $fileName "<td>$volName</td>"
+		Add-Content $fileName "<td>$totSpace</td>"
+		Add-Content $fileName "<td>$usedSpace</td>"
+		Add-Content $fileName "<td>$frSpace</td>"
+		Add-Content $fileName "<td bgcolor='#FF0000' align=center>$freePercent</td>"
+		#<td bgcolor='#FF0000' align=center>
+		Add-Content $fileName "</tr>"
+	}
+
+	else
+	{
+		Add-Content $fileName "<tr>"
+		Add-Content $fileName "<td>$devid</td>"
+		Add-Content $fileName "<td>$volName</td>"
+		Add-Content $fileName "<td>$totSpace</td>"
+		Add-Content $fileName "<td>$usedSpace</td>"
+		Add-Content $fileName "<td>$frSpace</td>"
+		Add-Content $fileName "<td bgcolor='#FBB917' align=center>$freePercent</td>"
+		# #FBB917
+		Add-Content $fileName "</tr>"
+	}
+}
+
+writeHtmlHeader $FreeSpaceFileName
+###endregion FreeSpace ###
+
+
+###region queries ###
+### DEV - some servers in xyz ###
+$Query = "Get-ADComputer -Filter { (Name -like 'xyz-*') -AND (OperatingSystem -like '*server*') -AND (OperatingSystem -notlike '*OnTap*') -AND (OperatingSystem -notlike '*OneFS*') -AND (enabled -eq $True) }, $ScriptName, run on $env:computername"
+
+$ColHosts = Get-ADComputer -Filter { (Name -like "xyz-*") -AND (OperatingSystem -like "*server*") -AND (OperatingSystem -notlike "*OnTap*") -AND (OperatingSystem -notlike "*OneFS*") -AND (enabled -eq $True) }`
+-Properties Name, SamAccountName, DistinguishedName, CanonicalName, Description, OperatingSystem, OperatingSystemVersion, IPv4Address, LastLogonDate, whenCreated, MemberOf
+### DEV - some servers in xyz ###>
+
+
+<### PROD - all servers ###
+$Query = "Get-ADComputer -Filter {(OperatingSystem -like '*server*') -AND (OperatingSystem -notlike '*OnTap*') -AND (OperatingSystem -notlike '*OneFS*') -AND (enabled -eq $True)}, $ScriptName, run on $env:computername"
+
+$ColHosts = Get-ADComputer -Filter {(OperatingSystem -like "*server*") -AND (OperatingSystem -notlike "*OnTap*") -AND (OperatingSystem -notlike "*OneFS*") -AND (enabled -eq $True)}`
+-Properties Name, SamAccountName, DistinguishedName, CanonicalName, Description, OperatingSystem, OperatingSystemVersion, IPv4Address, LastLogonDate, whenCreated, MemberOf
+### PROD - all servers ###>
+###endregion queries ###
+
+
+### get the data for each server ###
+$ColHosts = $ColHosts | Sort-Object "Name"
+ForEach ($ColHost in $ColHosts)
+{
+	$ActivityMessage = $ScriptName + " - Getting data for: " + $ColHost.Name
+	$StatusMessage = ("Processing {0} of {1}: {2}" -f $Count, @($ColHosts).count, $ColHost.Name)
+	$PercentComplete = ($Count / @($ColHosts).count * 100)
+	Write-Progress -Activity $ActivityMessage -Status $StatusMessage -PercentComplete $PercentComplete
+	
+	
+	### LastLogonDate build ###
+	if ($ColHost.LastLogonDate)
+	{
+		$ColHostLastLogonDate = $ColHost.LastLogonDate.ToString('yyyy-MM-dd')
+		$ColHostLogonAge = ($SimpleDate - $ColHost.LastLogonDate).days
+	}
+	
+	else
+	{
+		$ColHostLastLogonDate = "Never"
+		$ColHostLogonAge = "Never"
+	}
+	
+	
+	###region query active servers ###
+	if ($ColHostLogonAge -le $MaxLastLogonDays -AND $ColHostLogonAge -ne "Never")
+	{
+		Write-Host (Get-Date).ToString('HH:mm') $ColHost.Name ", Logon Age - $ColHostLogonAge, has logged on last $MaxLastLogonDays days" -Foregroundcolor Cyan -Backgroundcolor Black
+	
+		$ColHostNameNormalized = $ColHost.Name -replace '\d+', ''
+		
+		
+		###region AD Info ###
+		if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Trying to get AD info for:" $ColHost.Name -Foregroundcolor Cyan}
+		
+		$ColHostName = $ColHost.Name
+		$ColHostDescription = $ColHost.Description
+		
+	
+		### OU build - CanonicalName ###
+		$OUNormalizedCN = $ColHost.CanonicalName
+		$OUNormalizedCN = $OUNormalizedCN.Replace($DomainDNSRootReplace, "")
+		$OUNormalizedCN = $OUNormalizedCN.Replace($ColHost.Name, "")
+		$OUNormalizedCN = $OUNormalizedCN.Replace("/", " - ")
+		
+		
+		### type build ###
+		if ($OUNormalizedCN -like "*prod*" -AND $ColHost.Name -notlike "*test*" -AND $ColHost.Name -notlike "*dev*" -AND $ColHost.Name -notlike "*poc*")
+		{
+			$ServerType = "PROD"
+		}
+		
+		elseif ($OUNormalizedCN -like "*test*" -OR $ColHost.Name -like "*test*" -OR $ColHost.Name -like "*dev*" -OR $ColHost.Name -like "*poc*")
+		{
+			$ServerType = "DEV"
+		}
+		
+		else
+		{
+			$ServerType = "Unknown"
+		}			
+		
+		
+		if ($ConsoleVerboseFull) {Write-Host (Get-Date).ToString('HH:mm') $ColHost.Name "-" $ColHost.OperatingSystem  -Foregroundcolor White}
+		
+		
+		###region OS build ###
+		if ($ColHost.OperatingSystem -like "Windows Server®*")
+		{
+			$OSNormalized = $ColHost.OperatingSystem
+			$OSNormalized = $OSNormalized.Replace("Windows Server® ", "")
+			if ($ConsoleVerboseFull) {Write-Host (Get-Date).ToString('HH:mm') $ColHost.Name "-" $OSNormalized -Foregroundcolor Yellow}
+		}
+		
+		elseif ($ColHost.OperatingSystem -like "*Server®*")
+		{
+			$OSNormalized = $ColHost.OperatingSystem
+			$OSNormalized = $OSNormalized.Replace("Server® ", "")
+			if ($ConsoleVerboseFull) {Write-Host (Get-Date).ToString('HH:mm') $ColHost.Name "-" $OSNormalized -Foregroundcolor Yellow}
+		}
+	
+		else
+		{
+			$OSNormalized = $ColHost.OperatingSystem
+			$OSNormalized = $OSNormalized.Replace("Windows ", "")
+			$OSNormalized = $OSNormalized.Replace("Server ", "")
+			if ($ConsoleVerboseFull) {Write-Host (Get-Date).ToString('HH:mm') $ColHost.Name "-" $OSNormalized -Foregroundcolor Red}
+		}
+		###endregion OS build ###
+		
+	
+		### MemberOf build ###
+		if ($ColHost.MemberOf)
+		{
+			$MemberOfNormalized = $ColHost.MemberOf
+			$MemberOfNormalized = $MemberOfNormalized.Replace($DomainDNReplace, "")
+			$MemberOfNormalized = $MemberOfNormalized.Replace(",OU=", " - ")
+			$MemberOfNormalized = $MemberOfNormalized.Replace("CN=", "")
+			$MemberOfNormalized = ($MemberOfNormalized | Out-String)
+		}
+		else
+		{
+			$MemberOfNormalized = "None"
+		}
+		### $MemberOfNormalized = $MemberOfNormalized.Replace("`r`n"," - ") ###>
+		###endregion AD Info ###
+		
+		
+		$ReportObject = New-Object PSObject
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "Server" -Value $ColHostName
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "OS" -Value $OSNormalized
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "OSVersion" -Value $ColHost.OperatingSystemVersion
+		
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "OU" -Value $OUNormalizedCN
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "Type" -Value $ServerType
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "Description" -Value $ColHostDescription
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "MemberOf" -Value $MemberOfNormalized
+		
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "LogonAge" -Value $ColHostLogonAge
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "LogonDate" -Value $ColHostLastLogonDate
+		$ReportObject | Add-Member -MemberType NoteProperty -Name "ObjectAge" -Value ($Now - $ColHost.whenCreated).days
+		
+		
+		if ($ReportType -eq "Full")
+		{
+			if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Trying to get WMI info for:" $ColHost.Name -Foregroundcolor Cyan}		
+			$WMIData = Get-WmiObject Win32_ComputerSystem -ComputerName $ColHost.Name -ErrorVariable ErrVarWMI -ErrorAction SilentlyContinue
+	
+	
+			### log unreachable servers ###
+			if ($ErrVarWMI)
+			{
+				Write-Host (Get-Date).ToString('HH:mm') $ColHost.Name ": " $ErrVarWMI -Foregroundcolor Red
+				Add-Content -Path $LogFileWMI "$ColHost - $OSNormalized - $DateTimeStamp - $ErrVarWMI"
+				
+				$ErrVarWMI = ($ErrVarWMI | Out-String)
+				$Manufacturer = $ErrVarWMI
+				$Model = $ErrVarWMI
+				$RAM = $ErrVarWMI
+				$PHCPUs = $ErrVarWMI
+				$LogCPUs = $ErrVarWMI
+				$WMIIP = "Unknown"
+				$Uptime = "Unknown"
+				$Lastboot = "Unknown"
+				$PSRoles = "Unknown"
+			}
+			
+			
+			###region collect data from reachable servers ###
+			else
+			{
+				### check physical / virtual / info ###
+				if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Adding WMI info for: " $ColHost.Name -Foregroundcolor Green}
+				$Manufacturer = $WMIData.Manufacturer
+				$Model = $WMIData.Model
+				$WMIRAM = Get-WMIObject -class Win32_PhysicalMemory -ComputerName $ColHost.Name | Measure-Object -Property capacity -Sum | select @{N="RAM"; E={[math]::round(($_.Sum / 1GB),2)}}
+				$RAM = $WMIRAM.RAM
+				$PHCPUs = $WMIData.NumberOfProcessors
+				$LogCPUs = $WMIData.NumberOfLogicalProcessors
+			
+			
+				###region FreeSpace ###
+				Add-Content $FreeSpaceFileName "<table width='100%'><tbody>"
+				Add-Content $FreeSpaceFileName "<tr bgcolor='#CCCCCC'>"
+			
+			
+				if ($Manufacturer -like "*VMware*" -or $Manufacturer -like "*Xen*")
+				{
+					Write-Host (Get-Date).ToString('HH:mm') "Found: " $ColHostName "-" $OSNormalized "- VM -" $ColHostDescription "-" $RAM "GB RAM - " $PHCPUs "PH-CPUs - " $LogCPUs "Log-CPUs" -Foregroundcolor Green
+					Add-Content $FreeSpaceFileName "<td width='100%' align='center' colSpan=6><font face='tahoma' color='#003399' size='2'><strong>$ColHostName - $OSNormalized - VM - $ColHostDescription - $RAM GB RAM - $PHCPUs PH-CPU -  $LogCPUs Log-CPU</strong></font></td>"
+					Add-Content $FreeSpaceFileName "</tr>"
+				}
+			
+				else
+				{
+					Write-Host (Get-Date).ToString('HH:mm') "Found: " $ColHostName "-" $OSNormalized "- PH -" $ColHostDescription "-" $Manufacturer "-" $Model "-" $RAM "GB RAM - " $PHCPUs "PH-CPUs - " $LogCPUs "Log-CPUs" -Foregroundcolor Green
+					Add-Content $FreeSpaceFileName "<td width='100%' align='center' colSpan=6><font face='tahoma' color='#003399' size='2'><strong>$ColHostName - $OSNormalized - PH - $ColHostDescription - $Manufacturer - $Model - $RAM GB RAM - $PHCPUs PH-CPU -  $LogCPUs Log-CPU</strong></font></td>"
+					
+					Add-Content $FreeSpaceFileName "</tr>"
+				}
+		
+				writeTableHeader $FreeSpaceFileName
+				
+				
+				### get disk space info ###
+				if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Adding WMI disk space info for: " $ColHost.Name -Foregroundcolor Green}
+				$dp = Get-WmiObject win32_logicaldisk -ComputerName $ColHost.Name | Where-Object {$_.drivetype -eq 3}
+				ForEach ($item in $dp)
+				{
+					### Write-Host $item.DeviceID  $item.VolumeName $item.FreeSpace $item.Size  -Foregroundcolor Cyan ###
+					writeDiskInfo $FreeSpaceFileName $item.DeviceID $item.VolumeName $item.FreeSpace $item.Size
+				}
+				Add-Content $FreeSpaceFileName "</table>"
+				###endregion FreeSpace ###
+				
+				
+				### get IPAddress info ###
+				if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Adding WMI IPAddress info for: " $ColHost.Name -Foregroundcolor Green}
+				$WMIIP = Get-WmiObject Win32_NetworkAdapterConfiguration -ComputerName $ColHost.Name | Where {$_.IPAddress} | Select -Expand IPAddress | Where {$_ -like '1*'} -ErrorAction SilentlyContinue
+				
+				if (-Not $WMIIP){$WMIIP = "Unknown"}
+				
+				
+				### get Boot Time / Uptime info ###
+				if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Adding WMI LastBoot / Uptime info for: " $ColHost.Name -Foregroundcolor Green}
+				$WMIOS = Get-WmiObject win32_operatingsystem -ComputerName $ColHost.Name -ErrorAction SilentlyContinue
+				
+				if ($WMIOS.LastBootUpTime)
+				{
+					$Lastboot = $WMIOS.ConvertToDateTime($WMIOS.LastBootUpTime)
+					$Uptime = ($Now - $Lastboot).Days
+				}
+				else
+				{
+					$Lastboot = "Unknown"
+					$Uptime = "Unknown"
+				}
+				
+				
+				### get Server Roles ###
+				if ($OSNormalized -like "*2012*")
+				{
+					if ($ConsoleVerbose) {Write-Host (Get-Date).ToString('HH:mm') "Adding Server Roles info for: " $ColHost.Name -Foregroundcolor Green}
+					$WindowsFeatures = Invoke-Command -ComputerName $ColHost.Name -ScriptBlock `
+					{Get-WindowsFeature | Where {$_.InstallState -eq "Installed" -and $_.FeatureType -eq "Role"} | Select DisplayName}
+					
+					ForEach ($WindowsFeature in $WindowsFeatures)
+					{
+						$Roles += $WindowsFeature.DisplayName + " ."
+					}
+				}
+			}
+			###endregion collect data from reachable servers ###
+		
+		
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "Manufacturer" -Value $Manufacturer
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "Model" -Value $Model
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "RAM" -Value $RAM
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "PH-CPU" -Value $PHCPUs
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "Log-CPU" -Value $LogCPUs
+			
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "IP-AD" -Value $ColHost.IPv4Address
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "IP-WMI" -Value $WMIIP
+			
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "Uptime" -Value $Uptime
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "Lastboot" -Value $Lastboot
+			
+			$ReportObject | Add-Member -MemberType NoteProperty -Name "Roles" -Value $Roles
+		}
+		
+
+		$Report += $ReportObject
+		
+		
+		$ColHostName = $NULL
+		$OSNormalized = $NULL
+		$OUNormalizedCN = $NULL
+		$ServerType = $NULL
+		$ColHostDescription = $NULL
+		$MemberOfNormalized = $NULL
+		$ColHostLogonAge = $NULL
+		$ColHostLastLogonDate = $NULL
+		$Manufacturer = $NULL
+		$Model = $NULL
+		$RAM = $NULL
+		$WMIIP = $NULL
+		$Uptime = $NULL
+		$Lastboot = $NULL
+		$Roles = $NULL
+		$ErrVarWMI = $NULL		
+	}
+	###endregion query active servers ###
+	
+	$Count++
+}
+### END OF: ForEach ($ColHost in $ColHosts) ###
+
+
+$TotalHosts = ($Report | Measure-Object).count
+
+
+### Report Build ###
+Write-Host (Get-Date).ToString('HH:mm') "Generating Report ..." -Foregroundcolor Cyan
+$SortedReport = $Report | Sort-Object "Server"
+
+$SortedReportOSHTML = $Report | Group-Object "OS" | Select Name, Count | Sort-Object Count, Name -Descending
+$SortedReportLocationsHTML = $Report | Group-Object "OU" | Select Name, Count | Sort-Object Name, Count
+$SortedReportLocationsHTMLCount = $Report | Group-Object "OU" | Select Name, Count | Sort-Object Count, Name -Descending
+
+
+
+### export to CSV without type header
+Write-Host (Get-Date).ToString('HH:mm') "Generating CSV ..." -Foregroundcolor Cyan
+$SortedReport | Export-Csv -NoTypeInformation -Encoding 'UTF8' $ReportFileCSV
+
+
+### HTML Build ###
+Write-Host (Get-Date).ToString('HH:mm') "Generating HTML ..." -Foregroundcolor Cyan
+$ReportHTML= $SortedReport | ConvertTo-Html -Fragment
+$ReportLocationsHTML = $SortedReportLocationsHTML | ConvertTo-Html -Fragment
+$ReportLocationsHTMLCount  = $SortedReportLocationsHTMLCount | ConvertTo-Html -Fragment
+$ReportLocationsHTML += "</p>"
+$ReportLocationsHTMLCount += "</p>"
+$ReportOSHTML = $SortedReportOSHTML | ConvertTo-Html -Fragment
+$ReportOSHTML += "</p>"
+
+
+$HTMLHead = "<html>
+<style>
+BODY{font-family: Calibri; font-size: 90%;}
+H1{font-size: 100%; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Calibri,Helvetica,sans-serif;}
+H2{font-size: 90%; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Calibri,Helvetica,sans-serif;}
+H3{font-size: 80%; font-family: 'Segoe UI Light','Segoe UI','Lucida Grande',Verdana,Arial,Calibri,Helvetica,sans-serif;}
+TABLE{border: 1px solid black; border-collapse: collapse; font-size: 85%;}
+TH{border: 1px solid #969595; background: #dddddd; padding: 5px; color: #000000;}
+TD{border: 1px solid #969595; padding: 5px; }
+</style>
+<body>
+<p>$TotalHosts servers logged on last $MaxLastLogonDays days - attached .</p>"
+
+$HTMLBody01 =  "<p style=""font-family: 'Calibri'; font-size: 90%; color:'black'""><b>OS types:</b><br>"			
+$HTMLBody02 =  "<p style=""font-family: 'Calibri'; font-size: 90%; color:'black'""><b>Locations by number:</b><br>"			
+$HTMLBody03 =  "<p style=""font-family: 'Calibri'; font-size: 90%; color:'black'""><b>Locations by name:</b><br>"	
+
+
+### execution time ###
+$ScriptEndRunTime = (Get-Date)
+$ScriptTotalRunTime = $(($ScriptEndRunTime-$ScriptStartRunTime).totalminutes)
+$ScriptTotalRunTime =[Math]::Round($ScriptTotalRunTime,1)
+Write-Host (Get-Date).ToString('HH:mm') "Script total running Time: " $ScriptTotalRunTime "minutes" -Foregroundcolor Cyan
+writeHtmlFooter $FreeSpaceFileName
+
+
+$HTMLTail01 = "<p style=""font-family: 'Calibri'; font-size: 75%; color:'black'"">Query used: $Query</p>"
+$HTMLTail02 = "<p style=""font-family: 'Calibri'; font-size: 55%; color:'black'"">" + $ScriptTotalRunTime + " m</p></body></html>"
+
+
+### $MSGBodyHTML = $HTMLHead + $ReportHTML + $HTMLTail01 + $HTMLTail02
+$MSGBodyHTML = $HTMLHead + $HTMLBody01 + $ReportOSHTML + $HTMLBody02 + $ReportLocationsHTMLCount + $HTMLBody03 + $ReportLocationsHTML + $HTMLTail01 + $HTMLTail02
+
+
+### checking email report status  ###
+if ($TotalHosts -gt "0")
+{
+	Write-Host (Get-Date).ToString('HH:mm') "Emailing report to $ITAdmin1@domain.com" -Foregroundcolor Green
+	Send-MailMessage `
+	-From "AD@domain.com" -To "$ITAdmin1@domain.com" `
+	-Subject $MsgSubject -Body $MSGBodyHTML -BodyAsHtml -Attachments $ReportFileCSV, $FreeSpaceFileName, $LogFileWMI -SMTPServer $SMTPServer `
+}
+
+else
+{
+	Write-Host (Get-Date).ToString('HH:mm') "not sending email - no matching servers found" -Foregroundcolor Yellow
+	<###
+	$MSGBody = "<html><body>"
+	$MSGBody += "<p style=""font-family: 'Arial'; font-size: '12px'; color:'red'"">No matching users found :(</p>"
+	$MSGBody += "<p style=""font-family: 'Arial'; font-size: '8px'; color:'black'"">" + $ScriptTotalRunTime + " m</p>"
+	$MSGBody += "</body></html>"
+	Send-MailMessage `
+	-From "AD@domain.com" -To "$ITAdmin1@domain.com" -CC "$CCITAdmin1" `
+	-Subject $MsgSubject -Body $MSGBody -BodyAsHtml -SMTPServer $SMTPServer
+	###>
+}
